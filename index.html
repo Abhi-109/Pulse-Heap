@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PulseHeap — Hospital Emergency Patient Prioritization Using Heaps</title>
+  <meta name="description" content="PulseHeap — a DSA project: hospital emergency patient prioritization using a hand-written min-heap priority queue." />
+  <meta name="theme-color" content="#334155" />
+  <link rel="icon" type="image/svg+xml" href="static/favicon.svg" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ================================================================
+       Header: title + complexity badge
+       ================================================================ -->
+  <header class="site-header">
+    <div class="brand">
+      <img class="brand-mark" src="static/logo.svg" alt="" width="44" height="44" />
+      <div class="brand-text">
+        <h1>PulseHeap</h1>
+        <p class="tagline">Hospital Emergency Patient Prioritization Using Heaps</p>
+      </div>
+    </div>
+    <ul class="complexity" aria-label="Time complexity of the heap operations">
+      <li class="badge">insert <code>O(log n)</code></li>
+      <li class="badge">remove <code>O(log n)</code></li>
+      <li class="badge">peek <code>O(1)</code></li>
+    </ul>
+  </header>
+
+  <!-- Status line: announces results and error messages (screen-reader friendly) -->
+  <p class="status" id="statusMsg" role="status" aria-live="polite">
+    Ready — register a patient or load the demo to begin.
+  </p>
+
+  <!-- ================================================================
+       Toolbar: demo data, FIFO comparison, step-by-step mode, speed
+       ================================================================ -->
+  <section class="toolbar" aria-label="Simulation controls">
+    <div class="toolbar-row">
+      <button type="button" class="btn" id="demoBtn">Load demo patients</button>
+
+      <button type="button" class="btn btn--ghost" id="resetBtn">Clear all</button>
+
+      <label class="switch">
+        <input type="checkbox" id="fifoToggle" />
+        <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+        <span class="switch-label">Compare with FIFO</span>
+      </label>
+
+      <label class="switch">
+        <input type="checkbox" id="stepToggle" />
+        <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+        <span class="switch-label">Step-by-step</span>
+      </label>
+
+      <button type="button" class="btn btn--primary" id="nextStepBtn" hidden>Next step &rsaquo;</button>
+
+      <label class="speed">
+        <span class="speed-label">Animation speed</span>
+        <input type="range" id="speedRange" min="0.5" max="2.5" step="0.5" value="1" />
+        <output id="speedValue" for="speedRange">1&times;</output>
+      </label>
+    </div>
+
+    <!-- Text line describing the current swap / comparison -->
+    <p class="step-line" id="stepText" aria-live="polite">
+      Step descriptions appear here while a patient is registered or treated.
+    </p>
+  </section>
+
+  <!-- ================================================================
+       Main layout: three panels
+       ================================================================ -->
+  <main class="layout">
+
+    <!-- ---------- Panel 1: register a patient ---------- -->
+    <section class="panel" aria-labelledby="regTitle">
+      <div class="panel-head">
+        <h2 id="regTitle">1 &middot; Register patient</h2>
+      </div>
+
+      <form id="patientForm" novalidate>
+        <div class="field">
+          <label for="pName">Patient name</label>
+          <input type="text" id="pName" placeholder="e.g. Maria Lopez" autocomplete="off"
+                 aria-describedby="errName hintName" />
+          <p class="field-error" id="errName" role="alert"></p>
+          <p class="field-hint" id="hintName">Duplicate names are fine — every patient gets a unique ID.</p>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="pAge">Age</label>
+            <input type="number" id="pAge" min="0" max="120" step="1" placeholder="Years"
+                   inputmode="numeric" aria-describedby="errAge" />
+            <p class="field-error" id="errAge" role="alert"></p>
+          </div>
+          <div class="field">
+            <label for="pCondition">Condition</label>
+            <input type="text" id="pCondition" list="conditionList" placeholder="e.g. Chest pain"
+                   autocomplete="off" aria-describedby="errCondition" />
+            <datalist id="conditionList">
+              <option>Chest pain</option>
+              <option>Difficulty breathing</option>
+              <option>Severe bleeding</option>
+              <option>Fracture</option>
+              <option>Deep laceration</option>
+              <option>High fever</option>
+              <option>Abdominal pain</option>
+              <option>Dizziness</option>
+              <option>Migraine</option>
+              <option>Sprained ankle</option>
+            </datalist>
+            <p class="field-error" id="errCondition" role="alert"></p>
+          </div>
+        </div>
+
+        <fieldset class="field triage-field">
+          <legend>Triage level</legend>
+          <div class="triage-options">
+            <span class="tl lv1"><input type="radio" name="level" id="lv1" value="1" />
+              <label for="lv1"><b>1</b><small>Critical</small></label></span>
+            <span class="tl lv2"><input type="radio" name="level" id="lv2" value="2" />
+              <label for="lv2"><b>2</b><small>Emergent</small></label></span>
+            <span class="tl lv3"><input type="radio" name="level" id="lv3" value="3" />
+              <label for="lv3"><b>3</b><small>Urgent</small></label></span>
+            <span class="tl lv4"><input type="radio" name="level" id="lv4" value="4" />
+              <label for="lv4"><b>4</b><small>Less urg.</small></label></span>
+            <span class="tl lv5"><input type="radio" name="level" id="lv5" value="5" />
+              <label for="lv5"><b>5</b><small>Non-urg.</small></label></span>
+          </div>
+          <p class="field-error" id="errLevel" role="alert"></p>
+        </fieldset>
+
+        <button type="submit" class="btn btn--primary btn--block" id="registerBtn">
+          Register patient
+        </button>
+      </form>
+    </section>
+
+    <!-- ---------- Panel 2: waiting list + treated history ---------- -->
+    <section class="panel" aria-labelledby="waitTitle">
+      <div class="panel-head">
+        <h2 id="waitTitle">2 &middot; Waiting list</h2>
+        <div class="panel-head-actions">
+          <span class="count" id="waitCount" aria-label="Patients waiting">0</span>
+          <button type="button" class="btn btn--primary" id="treatBtn">Treat next</button>
+        </div>
+      </div>
+
+      <p class="wait-note">
+        Sorted by priority — level 1 first, ties by arrival order.
+        A newly registered patient rises to its rank.
+      </p>
+
+      <!-- Waiting list is rendered here by app.js -->
+      <div id="waitList" class="wait-list"></div>
+
+      <!-- Treated history log -->
+      <div class="subpanel">
+        <div class="panel-head">
+          <h3>Treated history</h3>
+          <span class="count" id="treatedCount" aria-label="Patients treated">0</span>
+        </div>
+        <ul class="treated-list" id="treatedList"></ul>
+      </div>
+    </section>
+
+    <!-- ---------- Panel 3: heap view (SVG tree + array) ---------- -->
+    <section class="panel panel--heap" aria-labelledby="heapTitle">
+      <div class="panel-head">
+        <h2 id="heapTitle">3 &middot; Heap view</h2>
+        <span class="count" id="heapSize">0 nodes</span>
+      </div>
+
+      <div class="tree-wrap">
+        <svg id="heapSvg" viewBox="0 0 720 240" role="img"
+             aria-label="Binary heap drawn as a tree">
+          <defs>
+            <!-- Soft shadow under every node, so the graph reads as layered -->
+            <filter id="nodeShadow" x="-60%" y="-60%" width="220%" height="220%">
+              <feDropShadow dx="0" dy="2" stdDeviation="2.4"
+                            flood-color="#0f172a" flood-opacity="0.18" />
+            </filter>
+          </defs>
+          <g id="edgeLayer"></g>
+          <g id="nodeLayer"></g>
+        </svg>
+        <div class="tree-empty" id="heapEmpty">
+          <p class="empty-title">The heap is empty</p>
+          <p class="empty-hint">Registered patients appear here as a binary tree.</p>
+        </div>
+      </div>
+
+      <h3 class="array-title">Array form of the heap</h3>
+      <ol class="heap-array" id="heapArray"></ol>
+
+      <ul class="legend" aria-label="Triage colour legend">
+        <li class="lv1"><i></i>1 Critical</li>
+        <li class="lv2"><i></i>2 Emergent</li>
+        <li class="lv3"><i></i>3 Urgent</li>
+        <li class="lv4"><i></i>4 Less urgent</li>
+        <li class="lv5"><i></i>5 Non-urgent</li>
+      </ul>
+    </section>
+
+  </main>
+
+  <!-- ================================================================
+       Plain-English explanation: tech stack, the idea, the data flow
+       ================================================================ -->
+  <section class="explain" aria-labelledby="explainTitle">
+    <div class="explain-head">
+      <h2 id="explainTitle">How this page works — in plain English</h2>
+      <p>No frameworks, no build step, no database. Three files that a browser already knows how to run.</p>
+    </div>
+
+    <div class="explain-grid">
+      <article class="explain-card">
+        <span class="explain-kicker">Tech stack</span>
+        <h3>HTML, CSS and JavaScript</h3>
+        <ul class="explain-list">
+          <li><b>HTML</b> — the skeleton: panels, the form and the drawing canvas.</li>
+          <li><b>CSS</b> — the paint: colours, spacing, rounded cards and the smooth motion.</li>
+          <li><b>JavaScript</b> — the brain: keeps the heap in memory and redraws the page.</li>
+        </ul>
+      </article>
+
+      <article class="explain-card">
+        <span class="explain-kicker">The idea</span>
+        <h3>A queue where the sickest is always first</h3>
+        <p>A <b>min-heap</b> is a tree-shaped queue. The most urgent patient sits at the top,
+          so finding them is instant. Adding or removing someone only walks one root-to-leaf
+          path, which is why it stays fast — <code>O(log n)</code> — even with hundreds of patients.</p>
+        <p class="explain-rules"><b>Rule 1</b> lower triage level wins &middot;
+          <b>Rule 2</b> same level &rarr; earlier arrival wins.</p>
+      </article>
+
+      <article class="explain-card">
+        <span class="explain-kicker">One click, step by step</span>
+        <h3>From form to animation</h3>
+        <ol class="explain-steps">
+          <li>The form is checked and turned into a patient object.</li>
+          <li><code>heap.insert(patient)</code> updates the array and returns a list of steps.</li>
+          <li>The page replays those steps: compare, swap, compare…</li>
+          <li>Tree, array chips and waiting list all redraw together.</li>
+        </ol>
+      </article>
+    </div>
+
+    <p class="explain-foot">
+      Reading the code? <code>heap.js</code> is only the data structure, <code>app.js</code> is only
+      the page, and <code>README.md</code> has a plain-English walkthrough for teammates and viva questions.
+    </p>
+  </section>
+
+  <footer class="site-footer">
+    <p><strong>PulseHeap</strong> &middot; DSA project &middot; min-heap priority queue &middot; plain HTML, CSS and JavaScript — no libraries.</p>
+  </footer>
+
+  <!-- heap.js must load first: app.js uses the MinHeap class -->
+  <script src="heap.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

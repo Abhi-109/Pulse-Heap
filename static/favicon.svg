@@ -1,0 +1,25 @@
+<!-- ==========================================================================
+  static/favicon.svg — PulseHeap favicon (simplified logo)
+
+  The heartbeat line is dropped and the shapes are made bigger/bolder so the
+  mark still reads clearly at 16x16 and 32x32: three nodes and two thick
+  edges on the navy square.
+  ========================================================================== -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 32 32" width="32" height="32">
+  <title>PulseHeap</title>
+
+  <!-- Navy rounded square -->
+  <rect width="32" height="32" rx="7" fill="#334155"/>
+
+  <!-- Thick heap edges, drawn under the nodes -->
+  <g stroke="#f8fafc" stroke-width="2.6" stroke-linecap="round" fill="none">
+    <line x1="16" y1="10.5" x2="8"  y2="23"/>
+    <line x1="16" y1="10.5" x2="24" y2="23"/>
+  </g>
+
+  <!-- Three nodes: red root (most urgent), orange and green children -->
+  <circle cx="16" cy="10.5" r="5.5" fill="#dc2626"/>
+  <circle cx="8"  cy="23"   r="4.5" fill="#ea580c"/>
+  <circle cx="24" cy="23"   r="4.5" fill="#16a34a"/>
+</svg>

@@ -1,0 +1,36 @@
+<!-- ==========================================================================
+  static/logo.svg — PulseHeap logo
+  A flat, modern mark: a 3-node min-heap (root = most urgent, red) sitting
+  above a heartbeat line, on the site's dark navy rounded square.
+
+  Design rules:
+    · no gradients, no external fonts, no tiny detail
+    · triage colours used sparingly (red / orange / green only)
+    · the whole mark stays readable down to 40x40 px
+  ========================================================================== -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 64 64" width="64" height="64"
+     role="img" aria-label="PulseHeap">
+  <title>PulseHeap</title>
+
+  <!-- Dark navy rounded square (same colour as the old "ER" badge) -->
+  <rect width="64" height="64" rx="14" fill="#334155"/>
+
+  <!-- Heap edges: root -> left child -> right child.
+       Drawn BEFORE the nodes so the circles cover the line ends. -->
+  <g stroke="#e2e8f0" stroke-width="2.6" stroke-linecap="round" fill="none">
+    <line x1="32" y1="19" x2="17" y2="36"/>
+    <line x1="32" y1="19" x2="47" y2="36"/>
+  </g>
+
+  <!-- Heap nodes, coloured by triage level:
+       red = level 1 (root, most urgent), orange = level 2, green = level 4 -->
+  <circle cx="32" cy="19" r="7"   fill="#dc2626"/>
+  <circle cx="17" cy="36" r="5.5" fill="#ea580c"/>
+  <circle cx="47" cy="36" r="5.5" fill="#16a34a"/>
+
+  <!-- Heartbeat (ECG) line — the medical cue -->
+  <path d="M6 53 H24 L28 46 L33 59 L37 50 L40 53 H58"
+        fill="none" stroke="#f8fafc" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
