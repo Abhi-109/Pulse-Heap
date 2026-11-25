@@ -2,11 +2,11 @@
  * ============================================================================
  *  app.js — UI logic for "PulseHeap"
  * ============================================================================
- *  Everything DOM-related lives here. The data structure itself is in
- *  heap.js (MinHeap) so the two concerns stay separate:
+ *  Everything DOM-related lives here. The other two files stay focused:
  *
- *      heap.js  → how the priority queue works  (pure data)
- *      app.js   → how the page reacts           (forms, panels, animation)
+ *      heap.js    → how the priority queue works      (pure data, no DOM)
+ *      tree.js    → how the heap is drawn as a tree   (pure drawing, no data)
+ *      app.js     → how the page reacts               (forms, panels, steps)
  *
  *  How the animation works
  *  -----------------------
@@ -55,6 +55,10 @@
   /** Base delay (ms) per step type, divided by the speed slider value. */
   var WAIT = { compare: 340, swap: 560, insert: 500, remove: 560 };
 
+  /** Where the session is remembered (theme, patients, counters…). */
+  var STORE_KEY = 'pulseheap.v1';
+  var MAX_HISTORY = 30;
+
   /* ======================================================================
      2. Application state
      ====================================================================== */
@@ -68,6 +72,14 @@
   var fifoMode = false;           // show FIFO column next to priority order?
   var arrivingId = null;          // patient whose card should rise from the bottom
   var lastWaitingKey = '';        // signature of the last waiting order drawn
+  var searchTerm = '';            // current filter text for the waiting list
+  var theme = 'light';            // 'light' | 'dark'
+
+  /** Totals used by the stat strip (restored with the session). */
+  var stats = { compares: 0, swaps: 0 };
+
+  /** Undo stack: one snapshot per completed action. */
+  var historyStack = [];
 
   // Respect the OS "reduce motion" setting: no travel, very short pauses.
   var reduceMotion =
@@ -79,9 +91,11 @@
     busy: false,
     steps: [],
     cursor: 0,
+    preState: [],   // array BEFORE the operation (used by the step scrubber)
     state: [],      // replayed copy of the array (starts as pre-operation)
     timer: null,
     onDone: null,
+    focusAfter: null,
   };
 
   /* ======================================================================
@@ -89,6 +103,7 @@
      ====================================================================== */
 
   var $ = function (sel) { return document.querySelector(sel); };
+  var $$ = function (sel) { return Array.prototype.slice.call(document.querySelectorAll(sel)); };
 
   /** Escape user input before putting it into innerHTML (name, condition…). */
   function escapeHtml(str) {
@@ -100,7 +115,7 @@
       .replace(/'/g, '&#39;');
   }
 
-  /** Shorten a string for tree labels / array chips. */
+  /** Shorten a string for array chips. */
   function truncate(str, max) {
     str = String(str);
     return str.length > max ? str.slice(0, max - 1) + '…' : str;
@@ -149,6 +164,28 @@
     return Math.max(80, Math.round((WAIT[kind] || 400) * 0.85 / speed));
   }
 
+  /** Order patients by their arrival counter (used when rebuilding the heap). */
+  function bySeq(a, b) { return (a.seq || 0) - (b.seq || 0); }
+
+  /**
+   * Rebuild the heap from a plain list of patients.
+   * Inserting them in arrival order re-creates exactly the same priorities
+   * (the heap's comparator only uses level + seq), which is what makes undo
+   * and level editing possible without touching heap.js.
+   */
+  function rebuildHeap(list) {
+    heap.clear();
+    list.slice().sort(bySeq).forEach(function (p) { heap.insert(p); });
+  }
+
+  /** Does every parent beat both of its children? (the heap property) */
+  function heapHolds(arr) {
+    for (var i = 1; i < arr.length; i++) {
+      if (comparePatients(arr[i], arr[(i - 1) >> 1]) < 0) return false;
+    }
+    return true;
+  }
+
   /* ======================================================================
      4. Status + step text lines
      ====================================================================== */
@@ -177,21 +214,83 @@
   }
 
   /* ======================================================================
-     5. Panel rendering (waiting list, treated history, counts)
+     5. Stat strip + triage distribution
      ====================================================================== */
+
+  function renderStats() {
+    var list = displayState;
+    var counts = [0, 0, 0, 0, 0, 0];   // index = triage level
+
+    list.forEach(function (p) { counts[p.level] += 1; });
+
+    $('#statWaiting').textContent = String(list.length);
+    $('#statCritical').textContent = String(counts[1]);
+    $('#statTreated').textContent = String(treated.length);
+    $('#statCompares').textContent = String(stats.compares);
+    $('#statSwaps').textContent = String(stats.swaps);
+
+    for (var lv = 1; lv <= 5; lv++) {
+      var countEl = document.getElementById('distLv' + lv);
+      if (countEl) countEl.textContent = String(counts[lv]);
+    }
+
+    var bar = $('#distBar');
+    if (list.length === 0) {
+      bar.innerHTML = '<span class="dist-empty">No patients yet — the bar fills as you register them.</span>';
+      bar.setAttribute('aria-label', 'Triage distribution: empty');
+      return;
+    }
+
+    var parts = [];
+    for (var level = 1; level <= 5; level++) {
+      if (!counts[level]) continue;
+      var pct = (counts[level] / list.length) * 100;
+      parts.push(
+        '<span class="dist-seg lv' + level + '" style="width:' + pct.toFixed(2) + '%" ' +
+          'title="Level ' + level + ' ' + TRIAGE[level] + ': ' + counts[level] + ' patient' +
+          (counts[level] === 1 ? '' : 's') + '"></span>'
+      );
+    }
+    bar.innerHTML = parts.join('');
+    bar.setAttribute(
+      'aria-label',
+      'Triage distribution: ' + [1, 2, 3, 4, 5]
+        .map(function (l) { return counts[l] + ' at level ' + l; })
+        .join(', ')
+    );
+  }
+
+  /* ======================================================================
+     6. Panel rendering (waiting list, treated history, counts)
+     ====================================================================== */
+
+  /** The level picker that sits where the old static level tag was. */
+  function levelSelect(p) {
+    var options = '';
+    for (var lv = 1; lv <= 5; lv++) {
+      options += '<option value="' + lv + '"' + (lv === p.level ? ' selected' : '') + '>' +
+        lv + ' · ' + TRIAGE[lv] + '</option>';
+    }
+    return (
+      '<select class="lvl-edit lv' + p.level + '" data-pid="' + escapeHtml(p.id) + '" ' +
+        'aria-label="Change triage level for ' + escapeHtml(p.name) + '">' +
+        options +
+      '</select>'
+    );
+  }
 
   /** One waiting-list card (priority order, with rank). */
   function patientCard(p, rank) {
     var waited = formatWaiting(Date.now() - p.arrivalTs);
     return (
-      '<article class="card lv' + p.level + '" data-pid="' + escapeHtml(p.id) + '">' +
+      '<article class="card lv' + p.level + '" data-pid="' + escapeHtml(p.id) + '" role="listitem">' +
         '<span class="level-chip" aria-label="Triage level ' + p.level +
           ': ' + TRIAGE[p.level] + '">' + p.level + '</span>' +
         '<div class="patient-body">' +
           '<div class="patient-top">' +
             '<h4>' + escapeHtml(p.name) +
               '<span class="pid">' + escapeHtml(p.id) + '</span></h4>' +
-            '<span class="level-tag">' + TRIAGE[p.level] + '</span>' +
+            levelSelect(p) +
           '</div>' +
           '<p class="patient-meta">' + p.age + ' yrs · ' +
             escapeHtml(p.condition) + '</p>' +
@@ -207,7 +306,7 @@
   /** One compact row — used by the FIFO comparison and the history log. */
   function patientRow(p, meta) {
     return (
-      '<li class="row lv' + p.level + '">' +
+      '<li class="row lv' + p.level + '" role="listitem">' +
         '<span class="level-chip small">' + p.level + '</span>' +
         '<span class="row-name">' + escapeHtml(p.name) + '</span>' +
         '<span class="row-meta">' + meta + '</span>' +
@@ -224,9 +323,20 @@
     );
   }
 
+  /** Does this patient match the search box? */
+  function matchesSearch(p) {
+    if (!searchTerm) return true;
+    var q = searchTerm.toLowerCase();
+    return (
+      p.name.toLowerCase().indexOf(q) !== -1 ||
+      p.id.toLowerCase().indexOf(q) !== -1 ||
+      p.condition.toLowerCase().indexOf(q) !== -1
+    );
+  }
+
   /** A short signature of the waiting order, e.g. "prio|P3,P1,P2". */
   function waitingKey(list) {
-    return (fifoMode ? 'fifo|' : 'prio|') +
+    return (fifoMode ? 'fifo|' : 'prio|') + searchTerm + '|' +
       list.map(function (p) { return p.id; }).join(',');
   }
 
@@ -242,11 +352,15 @@
    * re-render, so a running animation is never restarted halfway.
    */
   function renderWaiting() {
-    var list = sortPatients(displayState);   // highest priority first
-    $('#waitCount').textContent = String(list.length);
+    var list = sortPatients(displayState);          // highest priority first
+    var visible = list.filter(matchesSearch);       // apply the search filter
 
-    var key = waitingKey(list);
-    if (key === lastWaitingKey) return;      // same patients, same order
+    $('#waitCount').textContent = searchTerm
+      ? visible.length + ' / ' + list.length
+      : String(list.length);
+
+    var key = waitingKey(visible);
+    if (key === lastWaitingKey) return;             // same patients, same order
     lastWaitingKey = key;
 
     var box = $('#waitList');
@@ -260,13 +374,22 @@
       return;
     }
 
+    if (visible.length === 0) {
+      box.innerHTML = emptyState(
+        'No patient matches “' + escapeHtml(searchTerm) + '”',
+        'Try another name, ID or condition — or clear the filter.'
+      );
+      arrivingId = null;
+      return;
+    }
+
     if (fifoMode) {
       // Same patients, two orders side by side: heap priority vs arrival.
-      var fifo = displayState
+      var fifo = visible
         .slice()
         .sort(function (a, b) { return a.seq - b.seq; });
 
-      var priorityRows = list
+      var priorityRows = visible
         .map(function (p, i) { return patientRow(p, '#' + (i + 1)); })
         .join('');
       var fifoRows = fifo
@@ -300,7 +423,7 @@
       }
     }
 
-    box.innerHTML = list
+    box.innerHTML = visible
       .map(function (p, i) { return patientCard(p, i + 1); })
       .join('');
 
@@ -347,7 +470,7 @@
 
     if (treated.length === 0) {
       $('#treatedList').innerHTML =
-        '<li class="empty">' +
+        '<li class="empty" role="listitem">' +
           '<p class="empty-title">No patients treated yet</p>' +
           '<p class="empty-hint">“Treat next” moves the most urgent patient ' +
           'here with their waiting time.</p>' +
@@ -366,19 +489,30 @@
       .join('');
   }
 
-  /** Re-render every panel from the current displayState. */
-  function renderAll() {
-    renderWaiting();
-    renderTreated();
-    renderTree(displayState, 0);
-    renderArray(displayState);
+  /** Heap size + the live heap-property badge. */
+  function updateHeapMeta() {
     $('#heapSize').textContent =
       displayState.length + (displayState.length === 1 ? ' node' : ' nodes');
     $('#heapEmpty').hidden = displayState.length > 0;
+
+    var ok = heapHolds(displayState);
+    var badge = $('#heapBadge');
+    badge.textContent = ok ? '✓ min-heap holds' : '⚠ order broken';
+    badge.classList.toggle('is-broken', !ok);
+  }
+
+  /** Re-render every panel from the current displayState. */
+  function renderAll(duration) {
+    renderStats();
+    renderWaiting();
+    renderTreated();
+    HeapTree.render(displayState, duration || 0);
+    renderArray(displayState);
+    updateHeapMeta();
   }
 
   /* ======================================================================
-     6. Array form of the heap (chips under the tree)
+     7. Array form of the heap (chips under the tree)
      ====================================================================== */
 
   /** Draw the heap as [index: level name] chips, highlighting active nodes. */
@@ -392,7 +526,7 @@
 
     box.innerHTML = arr
       .map(function (p, i) {
-        var active = highlightIds.has(p.id) ? ' is-active' : '';
+        var active = HeapTree.highlight.has(p.id) ? ' is-active' : '';
         return (
           '<li class="chip lv' + p.level + active + '" data-idx="' + i +
             '" title="index ' + i + ' — ' + escapeHtml(p.name) +
@@ -407,327 +541,144 @@
   }
 
   /* ======================================================================
-     7. Heap tree view (SVG)
-     ------------------------------------------------------------------------
-     The tree is laid out from the flat array using the standard formulas:
-        depth(i)    = floor(log2(i + 1))
-        parent(i)   = floor((i - 1) / 2)
-     Nodes are <g> elements kept in a Map keyed by patient id, so a node
-     glides to its new position (JS animation) instead of being recreated.
-     Edges are redrawn from the SAME animated positions every frame, so the
-     lines always stay attached to the circles.
-     ====================================================================== */
-
-  var SVG_NS = 'http://www.w3.org/2000/svg';
-  var TREE_W = 720;       // viewBox width (scales to the panel width)
-  var PAD_X = 46;         // side padding inside the viewBox
-  var TOP_Y = 46;         // y of the root row
-  var NODE_R_MAX = 20;    // biggest circle radius
-
-  var tree = {
-    svg: null, edgeLayer: null, nodeLayer: null,
-    nodes: new Map(),   // patient id -> <g>
-    edges: [],          // [{ line, parentId, childId }]
-    pos: new Map(),     // patient id -> { x, y } last drawn position
-    raf: null,          // id of the running animation frame
-    highlight: new Set(),
-    newIds: new Set(),  // ids that should fade in on their first drawing
-    rootTag: null,      // the small "NEXT" label above the root
-    rootId: null,       // patient id currently at index 0
-    r: NODE_R_MAX,      // current node radius (also used to trim the edges)
-  };
-  var highlightIds = tree.highlight;  // shorthand used by renderArray()
-
-  /**
-   * Position every patient of `arr` on the canvas.
-   * Time complexity: O(n).
-   */
-  function computeLayout(arr) {
-    var n = arr.length;
-    var positions = new Map();
-    if (n === 0) return { w: TREE_W, h: 240, r: NODE_R_MAX, positions: positions };
-
-    var maxDepth = Math.floor(Math.log2(n));         // deepest level
-    var maxSlots = Math.pow(2, maxDepth);            // nodes that row could hold
-    var slot = (TREE_W - PAD_X * 2) / maxSlots;      // px available per node
-    // Shrink the circles as the tree gets wide so nodes never overlap.
-    var r = Math.max(9, Math.min(NODE_R_MAX, Math.floor(slot / 2) - 5));
-    var rowH = maxDepth === 0 ? 0 : Math.min(86, (330 - TOP_Y) / maxDepth);
-
-    for (var i = 0; i < n; i++) {
-      var depth = Math.floor(Math.log2(i + 1));
-      var first = Math.pow(2, depth) - 1;            // index of the leftmost node
-      var k = i - first;                             // position within the row
-      var count = Math.pow(2, depth);
-      var x = PAD_X + ((k + 0.5) / count) * (TREE_W - PAD_X * 2);
-      var y = TOP_Y + depth * rowH;
-      positions.set(arr[i].id, { x: x, y: y, index: i });
-    }
-
-    var h = TOP_Y + maxDepth * rowH + r + 36;        // extra room for name labels
-    return { w: TREE_W, h: h, r: r, positions: positions };
-  }
-
-  /** Create one tree node: ring + coloured circle + level number + name. */
-  function createNodeGroup(p, r) {
-    var g = document.createElementNS(SVG_NS, 'g');
-    g.setAttribute('class', 'node lv' + p.level);
-
-    var ring = document.createElementNS(SVG_NS, 'circle');
-    ring.setAttribute('class', 'ring');
-    ring.setAttribute('r', String(r + 6));
-
-    var dot = document.createElementNS(SVG_NS, 'circle');
-    dot.setAttribute('class', 'dot');
-    dot.setAttribute('r', String(r));
-
-    var lvl = document.createElementNS(SVG_NS, 'text');
-    lvl.setAttribute('class', 'lvl');
-    lvl.setAttribute('y', '0');
-    lvl.textContent = String(p.level);
-
-    var name = document.createElementNS(SVG_NS, 'text');
-    name.setAttribute('class', 'name');
-    name.setAttribute('y', String(r + 15));
-    name.textContent = truncate(p.name, 11);
-
-    g.appendChild(ring);
-    g.appendChild(dot);
-    g.appendChild(lvl);
-    g.appendChild(name);
-    return g;
-  }
-
-  /** Move every node to its target position (instantly or animated). */
-  function moveNodesTo(layout, duration) {
-    if (tree.raf) { cancelAnimationFrame(tree.raf); tree.raf = null; }
-
-    var targets = layout.positions;
-    var dur = reduceMotion ? 0 : duration;
-
-    function setPos(id, x, y) {
-      tree.pos.set(id, { x: x, y: y });
-      var g = tree.nodes.get(id);
-      if (g) g.setAttribute('transform', 'translate(' + x.toFixed(2) + ' ' + y.toFixed(2) + ')');
-    }
-
-    if (dur <= 0) {
-      targets.forEach(function (t, id) { setPos(id, t.x, t.y); });
-      syncEdges();
-      return;
-    }
-
-    // Snapshot where each node is NOW (mid-flight nodes start from there).
-    var from = new Map();
-    targets.forEach(function (t, id) {
-      var cur = tree.pos.get(id);
-      from.set(id, cur ? { x: cur.x, y: cur.y } : { x: t.x, y: t.y });
-    });
-
-    var startTime = performance.now();
-    var easeOut = function (t) { return 1 - Math.pow(1 - t, 3); };
-
-    function frame(now) {
-      var t = Math.min(1, (now - startTime) / dur);
-      var k = easeOut(t);
-      targets.forEach(function (target, id) {
-        var f = from.get(id);
-        setPos(id, f.x + (target.x - f.x) * k, f.y + (target.y - f.y) * k);
-      });
-      syncEdges();
-      if (t < 1) {
-        tree.raf = requestAnimationFrame(frame);
-      } else {
-        tree.raf = null;
-        targets.forEach(function (target, id) { setPos(id, target.x, target.y); });
-        syncEdges();
-      }
-    }
-    tree.raf = requestAnimationFrame(frame);
-  }
-
-  /**
-   * Redraw every edge from the CURRENT animated node positions.
-   * Lines are trimmed at both ends so they never poke through the circles,
-   * and the "NEXT" tag always follows the node at index 0.
-   */
-  function syncEdges() {
-    var pad = (tree.r || NODE_R_MAX) + 6;   // stay outside the highlight ring
-    var root = tree.rootId ? tree.pos.get(tree.rootId) : null;
-
-    for (var i = 0; i < tree.edges.length; i++) {
-      var e = tree.edges[i];
-      var parent = tree.pos.get(e.parentId);
-      var child = tree.pos.get(e.childId);
-      if (!parent || !child) { e.line.setAttribute('visibility', 'hidden'); continue; }
-
-      var dx = child.x - parent.x;
-      var dy = child.y - parent.y;
-      var len = Math.sqrt(dx * dx + dy * dy);
-      if (len < pad * 2) { e.line.setAttribute('visibility', 'hidden'); continue; }
-
-      var ux = dx / len;
-      var uy = dy / len;
-      e.line.setAttribute('visibility', 'visible');
-      e.line.setAttribute('x1', (parent.x + ux * pad).toFixed(2));
-      e.line.setAttribute('y1', (parent.y + uy * pad).toFixed(2));
-      e.line.setAttribute('x2', (child.x - ux * pad).toFixed(2));
-      e.line.setAttribute('y2', (child.y - uy * pad).toFixed(2));
-    }
-
-    if (tree.rootTag) {
-      if (!root) {
-        tree.rootTag.setAttribute('visibility', 'hidden');
-      } else {
-        tree.rootTag.setAttribute('visibility', 'visible');
-        tree.rootTag.setAttribute('x', root.x.toFixed(2));
-        tree.rootTag.setAttribute('y', (root.y - pad - 4).toFixed(2));
-      }
-    }
-  }
-
-  /**
-   * Draw / update the tree for `arr`.
-   * @param {Array} arr  the array to draw (replayed or final state)
-   * @param {number} duration  ms of travel for nodes that changed place
-   */
-  function renderTree(arr, duration) {
-    var layout = computeLayout(arr);
-    tree.r = layout.r;
-    tree.rootId = arr.length > 0 ? arr[0].id : null;
-    tree.svg.setAttribute('viewBox', '0 0 ' + layout.w + ' ' + layout.h);
-
-    // 1. remove nodes that are no longer in the heap
-    tree.nodes.forEach(function (g, id) {
-      if (!layout.positions.has(id)) {
-        g.remove();
-        tree.nodes.delete(id);
-        tree.pos.delete(id);
-      }
-    });
-
-    // 2. create nodes for brand-new patients (fade in)
-    arr.forEach(function (p) {
-      if (tree.nodes.has(p.id)) return;
-      var g = createNodeGroup(p, layout.r);
-      if (tree.newIds.has(p.id)) {
-        g.classList.add('is-new');
-        tree.newIds.delete(p.id);
-      }
-      tree.nodeLayer.appendChild(g);
-      tree.nodes.set(p.id, g);
-      tree.pos.set(p.id, layout.positions.get(p.id));
-    });
-
-    // 3. keep circle radius / label sizes in sync with the tree width
-    tree.nodes.forEach(function (g, id) {
-      var t = layout.positions.get(id);
-      if (!t) return;
-      g.querySelector('.dot').setAttribute('r', layout.r);
-      g.querySelector('.ring').setAttribute('r', layout.r + 6);
-      g.querySelector('.name').setAttribute('y', layout.r + 15);
-      g.querySelector('.name').setAttribute('font-size', layout.r < 14 ? '9' : '10.5');
-      g.querySelector('.lvl').setAttribute('font-size', String(Math.max(10, Math.min(13, layout.r))));
-      // highlight ring on the two nodes taking part in the current step
-      g.classList.toggle('is-highlight', tree.highlight.has(id));
-    });
-
-    // 4. rebuild the edges (parents shift around as the array changes)
-    tree.edgeLayer.textContent = '';
-    tree.edges = [];
-    for (var i = 1; i < arr.length; i++) {
-      var parent = arr[Math.floor((i - 1) / 2)];
-      var line = document.createElementNS(SVG_NS, 'line');
-      // The edge inherits the CHILD's triage colour, so the graph stays readable.
-      line.setAttribute('class', 'edge lv' + arr[i].level);
-      tree.edgeLayer.appendChild(line);
-      tree.edges.push({ line: line, parentId: parent.id, childId: arr[i].id });
-    }
-
-    moveNodesTo(layout, duration || 0);
-
-    // Keep the "NEXT" tag drawn above the nodes.
-    if (tree.rootTag) tree.nodeLayer.appendChild(tree.rootTag);
-  }
-
-  /* ======================================================================
      8. Animation engine — replays the steps returned by the heap
      ====================================================================== */
 
-  /** Highlight the two nodes (and array chips) involved in a step. */
-  function setHighlight(step) {
-    tree.highlight.clear();
-    var state = op.state;
-    if (typeof step.i === 'number' && state[step.i]) tree.highlight.add(state[step.i].id);
-    if (typeof step.j === 'number' && state[step.j]) tree.highlight.add(state[step.j].id);
-    if (step.type === 'insert' && step.value) tree.highlight.add(step.value.id);
-    if (step.type === 'remove-root' && step.moved) tree.highlight.add(step.moved.id);
+  /**
+   * Apply one step to a plain array. Pure: no DOM, no heap.
+   * @returns {'insert'|'remove'|'swap'|'compare'} the kind of movement
+   */
+  function mutateState(s, step) {
+    if (step.type === 'insert') {
+      s.push(step.value);
+      return 'insert';
+    }
+    if (step.type === 'remove-root') {
+      if (s.length <= 1) {
+        s.length = 0;                 // the only patient left
+      } else {
+        var last = s.pop();           // take the last node out…
+        s.shift();                    // …clear the old root…
+        s.unshift(last);              // …and put it at index 0
+      }
+      return 'remove';
+    }
+    if (step.type === 'swap') {
+      var tmp = s[step.i];
+      s[step.i] = s[step.j];
+      s[step.j] = tmp;
+      return 'swap';
+    }
+    return 'compare';
   }
 
-  function clearHighlight() { tree.highlight.clear(); }
+  /** Highlight the two nodes (and array chips) involved in a step. */
+  function setHighlight(step, state) {
+    HeapTree.highlight.clear();
+    if (typeof step.i === 'number' && state[step.i]) HeapTree.highlight.add(state[step.i].id);
+    if (typeof step.j === 'number' && state[step.j]) HeapTree.highlight.add(state[step.j].id);
+    if (step.type === 'insert' && step.value) HeapTree.highlight.add(step.value.id);
+    if (step.type === 'remove-root' && step.moved) HeapTree.highlight.add(step.moved.id);
+  }
+
+  function clearHighlight() {
+    HeapTree.clearHighlight();
+  }
+
+  /** Keep the step scrubber in sync with the operation. */
+  function updateScrub() {
+    var row = $('#scrubRow');
+    var range = $('#scrubRange');
+    var show = op.busy && stepMode && op.steps.length > 0;
+    row.hidden = !show;
+    if (!show) return;
+    range.max = String(op.steps.length);
+    range.value = String(op.cursor);
+    $('#scrubValue').textContent = op.cursor + ' / ' + op.steps.length;
+  }
 
   /**
    * Apply ONE step to the replayed array and redraw the panels.
    * Returns how long the UI should pause before the next step (ms).
    */
   function applyStep(step) {
-    var s = op.state;
-    var kind = 'compare';
-    clearHighlight();
+    var kind = mutateState(op.state, step);
 
     if (step.type === 'insert') {
-      // The new patient appears in its leaf slot, then bubbles up.
-      s.push(step.value);
-      tree.newIds.add(step.value.id);
+      HeapTree.markNew(step.value.id);
       arrivingId = step.value.id;   // let the waiting-list card rise to its rank
-      setHighlight(step);
-      kind = 'insert';
-    } else if (step.type === 'remove-root') {
-      // Remove the root, then move the LAST node into the root slot.
-      if (s.length <= 1) {
-        s.length = 0;
-      } else {
-        var last = s.pop();     // take the last node out…
-        s.shift();              // …clear the old root…
-        s.unshift(last);        // …and put it at index 0
-      }
-      if (step.moved) setHighlight(step);
-      kind = 'remove';
-    } else if (step.type === 'swap') {
-      var tmp = s[step.i];
-      s[step.i] = s[step.j];
-      s[step.j] = tmp;
-      setHighlight(step);
-      kind = 'swap';
-    } else if (step.type === 'compare') {
-      setHighlight(step);       // highlight only — nothing moves
-      kind = 'compare';
     }
 
-    displayState = s;
+    displayState = op.state;
+    clearHighlight();
+    setHighlight(step, op.state);
     setStepText(step.message);
 
-    // Redraw all three panels so everything stays in sync with the array.
+    // Redraw every panel so everything stays in sync with the array.
     // Compare steps only highlight — nothing travels, so no animation.
-    renderTree(s, kind === 'compare' ? 0 : scaledMove(kind));
-    renderArray(s);
+    HeapTree.render(op.state, kind === 'compare' ? 0 : scaledMove(kind));
+    renderArray(op.state);
     renderWaiting();
     renderTreated();
+    renderStats();
+    updateHeapMeta();
+    updateScrub();
 
     return scaledWait(kind);
   }
 
+  /** Build the array that exists after the first `k` steps. */
+  function stateAfter(k) {
+    var s = op.preState.slice();
+    for (var i = 0; i < k && i < op.steps.length; i++) mutateState(s, op.steps[i]);
+    return s;
+  }
+
+  /** Jump the paused operation to step `k` (the step scrubber). */
+  function jumpToStep(k) {
+    if (!op.busy) return;
+    op.cursor = Math.max(0, Math.min(op.steps.length, k));
+    arrivingId = null;
+    displayState = stateAfter(op.cursor);
+    op.state = displayState;
+
+    clearHighlight();
+    if (op.cursor > 0) setHighlight(op.steps[op.cursor - 1], displayState);
+
+    HeapTree.render(displayState, 0);
+    renderArray(displayState);
+    renderWaiting();
+    renderTreated();
+    renderStats();
+    updateHeapMeta();
+
+    if (op.cursor === 0) {
+      setStepText('Step-by-step mode — press “Next step” to run the first step.');
+    } else {
+      setStepText(op.steps[op.cursor - 1].message);
+    }
+    updateScrub();
+  }
+
   /** Start replaying a finished heap operation, step by step. */
-  function startOperation(preState, steps, onDone) {
+  function startOperation(preState, steps, onDone, focusAfter) {
     op.busy = true;
     op.steps = steps;
     op.cursor = 0;
+    op.preState = preState.slice();
     op.state = preState.slice();
     op.onDone = onDone;
+    op.focusAfter = focusAfter || null;
+
+    // The heap already did the work, so its real cost is known right now.
+    stats.compares += steps.filter(function (s) { return s.type === 'compare'; }).length;
+    stats.swaps += steps.filter(function (s) { return s.type === 'swap'; }).length;
+
     displayState = op.state;
     clearHighlight();
     renderAll();
     updateControls();
+    updateScrub();
 
     if (stepMode) {
       setStepText('Step-by-step mode — press “Next step” to run the first step.');
@@ -764,28 +715,198 @@
   function finishOperation() {
     if (op.timer) { clearTimeout(op.timer); op.timer = null; }
     var done = op.onDone;
+    var focusAfter = op.focusAfter;
 
     op.busy = false;
     op.steps = [];
     op.cursor = 0;
     op.onDone = null;
+    op.focusAfter = null;
+    op.preState = [];
     clearHighlight();
     displayState = heap.toArray();   // the authoritative final state
     if (done) done();
 
     renderAll();
     updateControls();
+    updateScrub();
     clearStepText();
+    save();
+
+    if (focusAfter) {
+      var el = $(focusAfter);
+      if (el && !el.disabled) el.focus({ preventScroll: true });
+    }
   }
 
   /* ======================================================================
-     9. Operations: register, treat, demo
+     9. Undo history + persistence
+     ====================================================================== */
+
+  /** Freeze the current session so it can be restored later. */
+  function snapshot(label) {
+    return {
+      label: label,
+      patients: heap.toArray(),
+      treated: treated.slice(),
+      idCounter: idCounter,
+      stats: { compares: stats.compares, swaps: stats.swaps },
+    };
+  }
+
+  function pushHistory(label) {
+    historyStack.push(snapshot(label));
+    if (historyStack.length > MAX_HISTORY) historyStack.shift();
+    updateControls();
+  }
+
+  /** Step back one completed action. */
+  function undo() {
+    if (op.busy || historyStack.length === 0) {
+      if (!op.busy) setStatus('Nothing to undo yet.', true);
+      return;
+    }
+
+    var snap = historyStack.pop();
+    heap.clear();
+    snap.patients.slice().sort(bySeq).forEach(function (p) { heap.insert(p); });
+
+    treated = snap.treated;
+    idCounter = snap.idCounter;
+    stats = snap.stats;
+
+    displayState = heap.toArray();
+    arrivingId = null;
+    lastWaitingKey = '';
+
+    renderAll();
+    updateControls();
+    clearStepText();
+    save();
+    setStatus('Undid ' + snap.label + '.');
+  }
+
+  /** Save the session (patients, counters, theme, options) in this browser. */
+  function save() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        v: 1,
+        patients: heap.toArray(),
+        treated: treated,
+        idCounter: idCounter,
+        stats: stats,
+        theme: theme,
+        fifo: fifoMode,
+        step: stepMode,
+        speed: speed,
+      }));
+    } catch (e) {
+      // Storage can be blocked (private mode, some file:// setups) — the page
+      // still works, it just forgets between visits.
+    }
+  }
+
+  /** Is this a patient object we can trust from storage? */
+  function isPatient(p) {
+    return !!p && typeof p.id === 'string' && typeof p.name === 'string' &&
+      typeof p.condition === 'string' && typeof p.arrivalTs === 'number' &&
+      typeof p.level === 'number' && p.level >= 1 && p.level <= 5 &&
+      typeof p.arrivalTime === 'string';
+  }
+
+  /** Restore the previous session. Returns true when something was loaded. */
+  function restore() {
+    var raw = null;
+    try { raw = localStorage.getItem(STORE_KEY); } catch (e) { return false; }
+    if (!raw) return false;
+
+    var data;
+    try { data = JSON.parse(raw); } catch (e) { return false; }
+    if (!data || data.v !== 1) return false;
+
+    applyTheme(data.theme === 'dark' ? 'dark' : 'light');
+    fifoMode = !!data.fifo;
+    stepMode = !!data.step;
+    speed = typeof data.speed === 'number' ? data.speed : 1;
+
+    stats = {
+      compares: data.stats && Number(data.stats.compares) || 0,
+      swaps: data.stats && Number(data.stats.swaps) || 0,
+    };
+
+    var patients = (Array.isArray(data.patients) ? data.patients : []).filter(isPatient);
+    rebuildHeap(patients);
+
+    treated = (Array.isArray(data.treated) ? data.treated : [])
+      .filter(function (entry) {
+        return entry && isPatient(entry.patient) && typeof entry.waitedMs === 'number';
+      });
+
+    idCounter = Math.max(Number(data.idCounter) || 0, patients.length);
+    displayState = heap.toArray();
+    lastWaitingKey = '';
+    return patients.length > 0 || treated.length > 0;
+  }
+
+  /* ======================================================================
+     10. CSV export
+     ====================================================================== */
+
+  function csvCell(value) {
+    var s = String(value == null ? '' : value);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+
+  /** Download every waiting + treated patient as a spreadsheet-friendly file. */
+  function exportCsv() {
+    var now = Date.now();
+    var rows = [['Status', 'ID', 'Name', 'Age', 'Triage level', 'Triage name',
+                 'Condition', 'Arrived', 'Waiting']];
+
+    sortPatients(heap.toArray()).forEach(function (p) {
+      rows.push(['Waiting', p.id, p.name, p.age, p.level, TRIAGE[p.level],
+                 p.condition, p.arrivalTime, formatWaiting(now - p.arrivalTs)]);
+    });
+
+    treated.forEach(function (entry) {
+      var p = entry.patient;
+      rows.push(['Treated', p.id, p.name, p.age, p.level, TRIAGE[p.level],
+                 p.condition, p.arrivalTime, formatWaiting(entry.waitedMs)]);
+    });
+
+    var csv = rows.map(function (row) { return row.map(csvCell).join(','); }).join('\r\n');
+    var stamp = new Date();
+    var name = 'pulseheap-' + stamp.getFullYear() +
+      pad2(stamp.getMonth() + 1) + pad2(stamp.getDate()) + '-' +
+      pad2(stamp.getHours()) + pad2(stamp.getMinutes()) + '.csv';
+
+    var blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+
+    setStatus(
+      rows.length === 1
+        ? 'Nothing to export yet — register or load a patient first.'
+        : 'Exported ' + (rows.length - 1) + ' patients to ' + name + '.',
+      rows.length === 1
+    );
+  }
+
+  /* ======================================================================
+     11. Operations: register, treat, demo, clear, level edit
      ====================================================================== */
 
   /** Insert a validated patient and animate the bubble-up. */
   function startInsert(patient) {
     if (op.busy) return;
     var preState = heap.toArray();
+    pushHistory('registration of ' + patient.name);
     var steps = heap.insert(patient);       // mutates immediately, returns steps
 
     startOperation(preState, steps, function () {
@@ -793,7 +914,7 @@
         'Registered ' + patient.name + ' (' + patient.id +
         ') as level ' + patient.level + ' — ' + TRIAGE[patient.level] + '.'
       );
-    });
+    }, '#pName');
   }
 
   /** Extract the most urgent patient and animate the sink-down. */
@@ -806,7 +927,10 @@
       return;
     }
 
+    var next = heap.peek();
     var preState = heap.toArray();
+    pushHistory('treating ' + next.name);
+
     var result = heap.extractMin();
     var patient = result.patient;
 
@@ -821,13 +945,15 @@
         'Treated ' + patient.name + ' (' + patient.id +
         ') — waited ' + formatWaiting(waitedMs) + '.'
       );
-    });
+    }, '#treatBtn');
   }
 
   /** Load the 10 demo patients instantly (bulk insert, no animation). */
   function loadDemo() {
     if (op.busy) return;
     var now = Date.now();
+
+    pushHistory('loading the demo patients');
 
     DEMO_PATIENTS.forEach(function (d, i) {
       // Stagger arrivals so waiting times differ (last one just arrived).
@@ -837,7 +963,9 @@
 
     displayState = heap.toArray();
     clearHighlight();
+    lastWaitingKey = '';
     renderAll();
+    save();
     setStatus('Loaded ' + DEMO_PATIENTS.length + ' demo patients into the heap.');
     clearStepText();
   }
@@ -845,6 +973,12 @@
   /** Empty the heap and the treated history (a fresh simulation). */
   function resetAll() {
     if (op.busy) return;
+    if (heap.size() === 0 && treated.length === 0) {
+      setStatus('Already empty — register a patient or load the demo.');
+      return;
+    }
+
+    pushHistory('clearing everything');
 
     heap.clear();
     treated = [];
@@ -857,11 +991,48 @@
     renderAll();
     updateControls();
     clearStepText();
+    save();
     setStatus('Cleared — the heap and the treated history are empty again.');
   }
 
+  /** Change a waiting patient's triage level in place and re-heapify. */
+  function changeLevel(id, level) {
+    if (op.busy) return;
+
+    var arr = heap.toArray();
+    var patient = null;
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i].id === id) { patient = arr[i]; break; }
+    }
+    if (!patient || patient.level === level) return;
+
+    var oldLevel = patient.level;
+    pushHistory('changing ' + patient.name + ' to level ' + level);
+
+    patient.level = level;
+    rebuildHeap(arr);
+
+    displayState = heap.toArray();
+    arrivingId = null;
+    lastWaitingKey = '';
+    renderAll(reduceMotion ? 0 : 420);
+    save();
+
+    setStatus(
+      'Changed ' + patient.name + ' from level ' + oldLevel + ' (' +
+      TRIAGE[oldLevel] + ') to level ' + level + ' (' + TRIAGE[level] +
+      ') — the heap re-ordered itself in O(log n).'
+    );
+
+    // Put the keyboard focus back on the same picker after the re-render.
+    requestAnimationFrame(function () {
+      var sel = document.querySelector('.lvl-edit[data-pid="' + id + '"]');
+      if (sel) sel.focus({ preventScroll: true });
+    });
+  }
+
   /* ======================================================================
-     10. Form validation
+     12. Form validation
      ====================================================================== */
 
   function showError(id, msg) {
@@ -935,11 +1106,10 @@
     ['pName', 'pAge', 'pCondition'].forEach(function (id) {
       $('#' + id).removeAttribute('aria-invalid');
     });
-    $('#pName').focus();
   }
 
   /* ======================================================================
-     11. Control states (disabled while an animation is running)
+     13. Control states (disabled while an animation is running)
      ====================================================================== */
 
   function updateControls() {
@@ -948,13 +1118,198 @@
     $('#resetBtn').disabled = op.busy;
     $('#treatBtn').disabled = op.busy;
     $('#stepToggle').disabled = op.busy;   // cannot change modes mid-operation
+    $('#undoBtn').disabled = op.busy || historyStack.length === 0;
 
     // The "Next step" button only exists while a paused operation is running.
     $('#nextStepBtn').hidden = !(op.busy && stepMode);
   }
 
   /* ======================================================================
-     12. Live waiting times (updates every second, no full re-render)
+     14. Mode toggles + theme
+     ====================================================================== */
+
+  function toggleFifo(force) {
+    fifoMode = force === undefined ? !fifoMode : !!force;
+    $('#fifoToggle').checked = fifoMode;
+    lastWaitingKey = '';
+    renderWaiting();
+    save();
+    setStatus(
+      fifoMode
+        ? 'FIFO comparison on — priority order shown next to arrival order.'
+        : 'FIFO comparison off — showing priority order only.'
+    );
+  }
+
+  function toggleStep(force) {
+    stepMode = force === undefined ? !stepMode : !!force;
+    $('#stepToggle').checked = stepMode;
+    updateControls();
+    updateScrub();
+    save();
+    setStatus(
+      stepMode
+        ? 'Step-by-step mode ON — operations will pause for “Next step”.'
+        : 'Step-by-step mode OFF — operations play automatically.'
+    );
+    if (!op.busy) clearStepText();
+  }
+
+  function applyTheme(mode) {
+    theme = mode === 'dark' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', theme);
+    var btn = $('#themeBtn');
+    btn.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    btn.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#0b1120' : '#334155');
+  }
+
+  function toggleTheme() {
+    applyTheme(theme === 'dark' ? 'light' : 'dark');
+    save();
+    setStatus(theme === 'dark' ? 'Dark mode on.' : 'Light mode on.');
+  }
+
+  /* ======================================================================
+     15. Guided tour
+     ====================================================================== */
+
+  var TOUR_STEPS = [
+    {
+      target: '#registerPanel',
+      title: 'Register a patient',
+      text: 'Fill in the name, age, condition and triage level. Level 1 is the most urgent. ' +
+            'Press “Register patient” and watch where the new card lands.',
+    },
+    {
+      target: '#waitList',
+      title: 'The waiting list',
+      text: 'This is priority order, not arrival order — level 1 first, ties broken by who ' +
+            'arrived earlier. Change a card’s level right on the card to see it re-sort.',
+    },
+    {
+      target: '#heapPanel',
+      title: 'Inside the heap',
+      text: 'The tree is the array you see below it. A node only ever moves along one ' +
+            'root-to-leaf path, which is why insert and remove cost O(log n).',
+    },
+    {
+      target: '#demoBtn',
+      title: 'Try it now',
+      text: 'Load 10 demo patients, then press “Treat next”. Turn on Step-by-step to walk ' +
+            'through every comparison and swap yourself.',
+    },
+  ];
+
+  var tour = { index: 0, bubble: null, open: false };
+
+  function buildTourBubble() {
+    var bubble = document.createElement('div');
+    bubble.className = 'tour';
+    bubble.id = 'tourBubble';
+    bubble.setAttribute('role', 'dialog');
+    bubble.setAttribute('aria-modal', 'false');
+    bubble.setAttribute('aria-live', 'polite');
+    bubble.hidden = true;
+    bubble.innerHTML =
+      '<p class="tour-count"></p>' +
+      '<h3 class="tour-title"></h3>' +
+      '<p class="tour-text"></p>' +
+      '<div class="tour-actions">' +
+        '<button type="button" class="btn btn--ghost btn--small" data-tour="skip">Skip</button>' +
+        '<button type="button" class="btn btn--small" data-tour="prev">Back</button>' +
+        '<button type="button" class="btn btn--primary btn--small" data-tour="next">Next</button>' +
+      '</div>';
+    document.body.appendChild(bubble);
+
+    bubble.addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-tour]');
+      if (!btn) return;
+      var action = btn.getAttribute('data-tour');
+      if (action === 'skip') endTour();
+      else if (action === 'prev') showTourStep(tour.index - 1);
+      else if (action === 'next') {
+        if (tour.index >= TOUR_STEPS.length - 1) endTour();
+        else showTourStep(tour.index + 1);
+      }
+    });
+
+    tour.bubble = bubble;
+    return bubble;
+  }
+
+  function startTour() {
+    if (op.busy) return;
+    if (!tour.bubble) buildTourBubble();
+    tour.open = true;
+    showTourStep(0);
+  }
+
+  function showTourStep(index) {
+    if (!tour.open) return;
+
+    if (index < 0) index = 0;
+    if (index >= TOUR_STEPS.length) {
+      endTour();
+      return;
+    }
+    tour.index = index;
+
+    var step = TOUR_STEPS[index];
+    var target = $(step.target);
+    if (!target) { endTour(); return; }
+
+    $$('.tour-target').forEach(function (el) { el.classList.remove('tour-target'); });
+    target.classList.add('tour-target');
+    target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+
+    var bubble = tour.bubble;
+    bubble.hidden = false;
+    bubble.querySelector('.tour-count').textContent =
+      'Step ' + (index + 1) + ' of ' + TOUR_STEPS.length;
+    bubble.querySelector('.tour-title').textContent = step.title;
+    bubble.querySelector('.tour-text').textContent = step.text;
+
+    var prev = bubble.querySelector('[data-tour="prev"]');
+    var next = bubble.querySelector('[data-tour="next"]');
+    prev.disabled = index === 0;
+    next.textContent = index === TOUR_STEPS.length - 1 ? 'Done' : 'Next';
+
+    positionTourBubble(target);
+    bubble.querySelector('[data-tour="next"]').focus({ preventScroll: true });
+  }
+
+  function positionTourBubble(target) {
+    var bubble = tour.bubble;
+    if (!bubble || bubble.hidden) return;
+
+    var rect = target.getBoundingClientRect();
+    var width = bubble.offsetWidth || 320;
+    var height = bubble.offsetHeight || 170;
+
+    var top = rect.bottom + 12;
+    if (top + height > window.innerHeight - 12) {
+      top = Math.max(12, rect.top - height - 12);
+    }
+    var left = Math.min(Math.max(12, rect.left + 8), window.innerWidth - width - 12);
+
+    bubble.style.top = Math.round(top) + 'px';
+    bubble.style.left = Math.round(left) + 'px';
+  }
+
+  function endTour() {
+    if (!tour.open) return;
+    tour.open = false;
+    if (tour.bubble) tour.bubble.hidden = true;
+    $$('.tour-target').forEach(function (el) { el.classList.remove('tour-target'); });
+    setStatus('Tour finished — press “?” any time to see it again.');
+    var demo = $('#demoBtn');
+    if (demo && !demo.disabled) demo.focus({ preventScroll: true });
+  }
+
+  /* ======================================================================
+     15b. Live waiting times (updates every second, no full re-render)
      ====================================================================== */
 
   function startWaitingTicker() {
@@ -968,7 +1323,7 @@
   }
 
   /* ======================================================================
-     13. Event wiring
+     16. Event wiring
      ====================================================================== */
 
   function bindEvents() {
@@ -996,67 +1351,140 @@
     // --- Treat the most urgent patient ---
     $('#treatBtn').addEventListener('click', treatNext);
 
-    // --- Demo data ---
+    // --- Demo data / undo / clear / export ---
     $('#demoBtn').addEventListener('click', loadDemo);
-
-    // --- Clear everything ---
+    $('#undoBtn').addEventListener('click', undo);
     $('#resetBtn').addEventListener('click', resetAll);
+    $('#exportBtn').addEventListener('click', exportCsv);
+    $('#tourBtn').addEventListener('click', startTour);
 
     // --- FIFO comparison toggle ---
-    $('#fifoToggle').addEventListener('change', function () {
-      fifoMode = this.checked;
-      renderWaiting();
-      setStatus(
-        fifoMode
-          ? 'FIFO comparison on — priority order shown next to arrival order.'
-          : 'FIFO comparison off — showing priority order only.'
-      );
-    });
+    $('#fifoToggle').addEventListener('change', function () { toggleFifo(this.checked); });
 
     // --- Step-by-step mode ---
-    $('#stepToggle').addEventListener('change', function () {
-      stepMode = this.checked;
-      setStatus(
-        stepMode
-          ? 'Step-by-step mode ON — operations will pause for “Next step”.'
-          : 'Step-by-step mode OFF — operations play automatically.'
-      );
-      if (!op.busy) clearStepText();
-    });
+    $('#stepToggle').addEventListener('change', function () { toggleStep(this.checked); });
 
     // --- Next step button ---
     $('#nextStepBtn').addEventListener('click', runOneStep);
+
+    // --- Step scrubber ---
+    $('#scrubRange').addEventListener('input', function () {
+      jumpToStep(Number(this.value));
+    });
 
     // --- Animation speed ---
     $('#speedRange').addEventListener('input', function () {
       speed = Number(this.value);
       $('#speedValue').textContent = speed + '×';
+      save();
+    });
+
+    // --- In-place level editing (delegated: cards are re-rendered) ---
+    $('#waitList').addEventListener('change', function (e) {
+      var sel = e.target.closest('.lvl-edit');
+      if (!sel) return;
+      changeLevel(sel.getAttribute('data-pid'), Number(sel.value));
+    });
+
+    // --- Search / filter ---
+    $('#searchInput').addEventListener('input', function () {
+      searchTerm = this.value.trim();
+      $('#searchClearBtn').hidden = searchTerm === '';
+      lastWaitingKey = '';
+      renderWaiting();
+    });
+    $('#searchClearBtn').addEventListener('click', function () {
+      searchTerm = '';
+      $('#searchInput').value = '';
+      $('#searchClearBtn').hidden = true;
+      lastWaitingKey = '';
+      renderWaiting();
+      $('#searchInput').focus();
+    });
+
+    // --- Theme ---
+    $('#themeBtn').addEventListener('click', toggleTheme);
+
+    // --- Keyboard shortcuts ---
+    document.addEventListener('keydown', onKeyDown);
+
+    // --- Keep the tour bubble anchored after a resize ---
+    window.addEventListener('resize', function () {
+      if (!tour.open) return;
+      var target = $(TOUR_STEPS[tour.index].target);
+      if (target) positionTourBubble(target);
     });
   }
 
+  /** Keyboard shortcuts (ignored while typing in a field). */
+  function onKeyDown(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    var tag = (e.target.tagName || '').toLowerCase();
+    var typing = tag === 'input' || tag === 'textarea' || tag === 'select' ||
+      e.target.isContentEditable;
+
+    if (typing) {
+      if (e.key === 'Escape') e.target.blur();
+      return;
+    }
+
+    if (e.key === '/') {
+      e.preventDefault();
+      $('#searchInput').focus();
+      return;
+    }
+    if (e.key === 'Escape') {
+      endTour();
+      return;
+    }
+
+    switch (e.key.toLowerCase()) {
+      case 'd': loadDemo(); break;
+      case 't': treatNext(); break;
+      case 'u': undo(); break;
+      case 'e': exportCsv(); break;
+      case 'f': toggleFifo(); break;
+      case 's': toggleStep(); break;
+      case '?': startTour(); break;
+      default: break;
+    }
+  }
+
   /* ======================================================================
-     14. Start the app
+     17. Start the app
      ====================================================================== */
+
+  function syncModeControls() {
+    $('#fifoToggle').checked = fifoMode;
+    $('#stepToggle').checked = stepMode;
+    $('#speedRange').value = String(speed);
+    $('#speedValue').textContent = speed + '×';
+    $('#searchClearBtn').hidden = true;
+    updateScrub();
+  }
 
   function init() {
     statusEl = $('#statusMsg');
     stepEl = $('#stepText');
 
-    tree.svg = $('#heapSvg');
-    tree.edgeLayer = $('#edgeLayer');
-    tree.nodeLayer = $('#nodeLayer');
+    HeapTree.init();
 
-    // Small label above the root: the patient who will be treated next.
-    tree.rootTag = document.createElementNS(SVG_NS, 'text');
-    tree.rootTag.setAttribute('class', 'root-tag');
-    tree.rootTag.textContent = 'NEXT';
-    tree.nodeLayer.appendChild(tree.rootTag);
+    var restored = false;
+    try { restored = restore(); } catch (e) { restored = false; }
+    if (!restored) applyTheme('light');
 
     bindEvents();
+    syncModeControls();
     updateControls();
     renderAll();
     startWaitingTicker();
-    setStatus('Ready — register a patient or load the demo to begin.');
+
+    setStatus(
+      restored
+        ? 'Welcome back — restored your last session from this browser.'
+        : 'Ready — register a patient or load the demo to begin.'
+    );
   }
 
   try {
@@ -1070,6 +1498,3 @@
     }
   }
 })();
-
-
-

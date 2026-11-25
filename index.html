@@ -12,7 +12,7 @@
 <body>
 
   <!-- ================================================================
-       Header: title + complexity badge
+       Header: title + complexity badges + theme switch
        ================================================================ -->
   <header class="site-header">
     <div class="brand">
@@ -22,11 +22,16 @@
         <p class="tagline">Hospital Emergency Patient Prioritization Using Heaps</p>
       </div>
     </div>
-    <ul class="complexity" aria-label="Time complexity of the heap operations">
-      <li class="badge">insert <code>O(log n)</code></li>
-      <li class="badge">remove <code>O(log n)</code></li>
-      <li class="badge">peek <code>O(1)</code></li>
-    </ul>
+    <div class="header-right">
+      <ul class="complexity" aria-label="Time complexity of the heap operations">
+        <li class="badge">insert <code>O(log n)</code></li>
+        <li class="badge">remove <code>O(log n)</code></li>
+        <li class="badge">peek <code>O(1)</code></li>
+      </ul>
+      <button type="button" class="theme-toggle" id="themeBtn" aria-pressed="false">
+        Dark mode
+      </button>
+    </div>
   </header>
 
   <!-- Status line: announces results and error messages (screen-reader friendly) -->
@@ -35,11 +40,55 @@
   </p>
 
   <!-- ================================================================
-       Toolbar: demo data, FIFO comparison, step-by-step mode, speed
+       Overview strip: live numbers + triage distribution
+       ================================================================ -->
+  <section class="stats" aria-label="Live overview">
+    <div class="stat">
+      <span class="stat-label">Waiting</span>
+      <strong class="stat-value" id="statWaiting">0</strong>
+      <small class="stat-note">patients in the heap</small>
+    </div>
+    <div class="stat stat--critical">
+      <span class="stat-label">Critical now</span>
+      <strong class="stat-value" id="statCritical">0</strong>
+      <small class="stat-note">triage level 1</small>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Treated</span>
+      <strong class="stat-value" id="statTreated">0</strong>
+      <small class="stat-note">sent to the ward</small>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Work done</span>
+      <strong class="stat-value stat-value--work" id="statOps">
+        <span id="statCompares">0</span><small>cmp</small>
+        <span id="statSwaps">0</span><small>swap</small>
+      </strong>
+      <small class="stat-note">comparisons / swaps</small>
+    </div>
+    <div class="dist-wrap">
+      <div class="dist" id="distBar" role="img" aria-label="Triage level distribution"></div>
+      <ul class="dist-legend" aria-label="Triage level counts">
+        <li class="lv1"><i></i>1 Critical <b id="distLv1">0</b></li>
+        <li class="lv2"><i></i>2 Emergent <b id="distLv2">0</b></li>
+        <li class="lv3"><i></i>3 Urgent <b id="distLv3">0</b></li>
+        <li class="lv4"><i></i>4 Less urgent <b id="distLv4">0</b></li>
+        <li class="lv5"><i></i>5 Non-urgent <b id="distLv5">0</b></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ================================================================
+       Toolbar: demo data, undo, export, FIFO comparison, step-by-step,
+                tour, speed, step scrubber
        ================================================================ -->
   <section class="toolbar" aria-label="Simulation controls">
     <div class="toolbar-row">
       <button type="button" class="btn" id="demoBtn">Load demo patients</button>
+
+      <button type="button" class="btn btn--ghost" id="undoBtn" disabled>Undo</button>
+
+      <button type="button" class="btn btn--ghost" id="exportBtn">Export CSV</button>
 
       <button type="button" class="btn btn--ghost" id="resetBtn">Clear all</button>
 
@@ -57,6 +106,8 @@
 
       <button type="button" class="btn btn--primary" id="nextStepBtn" hidden>Next step &rsaquo;</button>
 
+      <button type="button" class="btn btn--ghost" id="tourBtn">Take the tour</button>
+
       <label class="speed">
         <span class="speed-label">Animation speed</span>
         <input type="range" id="speedRange" min="0.5" max="2.5" step="0.5" value="1" />
@@ -68,6 +119,20 @@
     <p class="step-line" id="stepText" aria-live="polite">
       Step descriptions appear here while a patient is registered or treated.
     </p>
+
+    <!-- Step scrubber: drag to jump to any step of a paused operation -->
+    <div class="scrub" id="scrubRow" hidden>
+      <label for="scrubRange">Step</label>
+      <input type="range" id="scrubRange" min="0" max="0" step="1" value="0" />
+      <output id="scrubValue" for="scrubRange">0 / 0</output>
+    </div>
+
+    <p class="shortcuts">
+      Shortcuts:
+      <kbd>D</kbd> demo &middot; <kbd>T</kbd> treat &middot; <kbd>U</kbd> undo &middot;
+      <kbd>E</kbd> export &middot; <kbd>F</kbd> FIFO &middot; <kbd>S</kbd> step mode &middot;
+      <kbd>/</kbd> search &middot; <kbd>?</kbd> tour
+    </p>
   </section>
 
   <!-- ================================================================
@@ -76,7 +141,7 @@
   <main class="layout">
 
     <!-- ---------- Panel 1: register a patient ---------- -->
-    <section class="panel" aria-labelledby="regTitle">
+    <section class="panel" id="registerPanel" aria-labelledby="regTitle">
       <div class="panel-head">
         <h2 id="regTitle">1 &middot; Register patient</h2>
       </div>
@@ -155,8 +220,15 @@
         A newly registered patient rises to its rank.
       </p>
 
+      <div class="search-row">
+        <label class="visually-hidden" for="searchInput">Filter patients</label>
+        <input type="search" id="searchInput" placeholder="Filter by name, ID or condition"
+               autocomplete="off" />
+        <button type="button" class="btn btn--ghost btn--small" id="searchClearBtn" hidden>Clear</button>
+      </div>
+
       <!-- Waiting list is rendered here by app.js -->
-      <div id="waitList" class="wait-list"></div>
+      <div id="waitList" class="wait-list" role="list" aria-label="Patients waiting, highest priority first"></div>
 
       <!-- Treated history log -->
       <div class="subpanel">
@@ -164,15 +236,20 @@
           <h3>Treated history</h3>
           <span class="count" id="treatedCount" aria-label="Patients treated">0</span>
         </div>
-        <ul class="treated-list" id="treatedList"></ul>
+        <ul class="treated-list" id="treatedList" role="list" aria-label="Treated patients, newest first"></ul>
       </div>
     </section>
 
     <!-- ---------- Panel 3: heap view (SVG tree + array) ---------- -->
-    <section class="panel panel--heap" aria-labelledby="heapTitle">
+    <section class="panel panel--heap" id="heapPanel" aria-labelledby="heapTitle">
       <div class="panel-head">
         <h2 id="heapTitle">3 &middot; Heap view</h2>
-        <span class="count" id="heapSize">0 nodes</span>
+        <div class="panel-head-actions">
+          <span class="heap-badge" id="heapBadge" title="Every parent is at least as urgent as its children">
+            ✓ min-heap holds
+          </span>
+          <span class="count" id="heapSize">0 nodes</span>
+        </div>
       </div>
 
       <div class="tree-wrap">
@@ -185,6 +262,7 @@
                             flood-color="#0f172a" flood-opacity="0.18" />
             </filter>
           </defs>
+          <g id="guideLayer"></g>
           <g id="edgeLayer"></g>
           <g id="nodeLayer"></g>
         </svg>
@@ -214,7 +292,7 @@
   <section class="explain" aria-labelledby="explainTitle">
     <div class="explain-head">
       <h2 id="explainTitle">How this page works — in plain English</h2>
-      <p>No frameworks, no build step, no database. Three files that a browser already knows how to run.</p>
+      <p>No frameworks, no build step, no database. A few files that a browser already knows how to run.</p>
     </div>
 
     <div class="explain-grid">
@@ -231,7 +309,8 @@
       <article class="explain-card">
         <span class="explain-kicker">The idea</span>
         <h3>A queue where the sickest is always first</h3>
-        <p>A <b>min-heap</b> is a tree-shaped queue. The most urgent patient sits at the top,
+        <p>A <span class="glossary" tabindex="0" data-tip="A tree-shaped queue where every parent is at least as urgent as its children, so the root is always the highest priority item.">min-heap</span>
+          is a tree-shaped queue. The most urgent patient sits at the top,
           so finding them is instant. Adding or removing someone only walks one root-to-leaf
           path, which is why it stays fast — <code>O(log n)</code> — even with hundreds of patients.</p>
         <p class="explain-rules"><b>Rule 1</b> lower triage level wins &middot;
@@ -250,9 +329,27 @@
       </article>
     </div>
 
+    <div class="explain-table">
+      <h3>Why a heap beats keeping the list sorted</h3>
+      <p>n = patients waiting. A sorted array is easy to read but expensive to change;
+        the heap trades a tiny bit of reading work for much cheaper inserts and removals.</p>
+      <table class="cost">
+        <caption class="visually-hidden">Operation cost: sorted array versus min-heap</caption>
+        <thead>
+          <tr><th scope="col">Task</th><th scope="col">Sorted array</th><th scope="col">Min-heap</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">See who is next</th><td>O(1)</td><td class="win">O(1)</td></tr>
+          <tr><th scope="row">Add a patient</th><td>O(n) — shift everyone</td><td class="win">O(log n) — bubble up</td></tr>
+          <tr><th scope="row">Treat the next patient</th><td>O(n) — shift everyone</td><td class="win">O(log n) — sink down</td></tr>
+        </tbody>
+      </table>
+    </div>
+
     <p class="explain-foot">
-      Reading the code? <code>heap.js</code> is only the data structure, <code>app.js</code> is only
-      the page, and <code>README.md</code> has a plain-English walkthrough for teammates and viva questions.
+      Reading the code? <code>heap.js</code> is only the data structure,
+      <code>tree.js</code> draws the picture and <code>app.js</code> is the page.
+      <code>README.md</code> has a plain-English walkthrough for teammates and viva questions.
     </p>
   </section>
 
@@ -260,8 +357,9 @@
     <p><strong>PulseHeap</strong> &middot; DSA project &middot; min-heap priority queue &middot; plain HTML, CSS and JavaScript — no libraries.</p>
   </footer>
 
-  <!-- heap.js must load first: app.js uses the MinHeap class -->
+  <!-- Load order matters: heap.js (data) → tree.js (drawing) → app.js (page) -->
   <script src="heap.js"></script>
+  <script src="tree.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

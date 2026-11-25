@@ -22,13 +22,15 @@ No build step, no server, no libraries — just open the file:
 
 > Works offline from `file://` in Chrome, Edge, Firefox and Safari.
 
-### Run the unit tests (optional, needs Node.js)
+### Run the unit tests and the terminal dry-run (optional, needs Node.js)
 
 ```
-node heap.test.js
+node heap.test.js        → 22 assertions covering insert, extract, tie-breaks
+node tools/dry-run.js    → prints every heap step in the terminal
 ```
 
-22 assertions covering insert, extract, tie-breaking, steps and edge cases.
+The dry-run uses the same `heap.js` as the page, so it is a good way to explain
+the algorithm without a browser (or to see what the animation will do).
 
 ---
 
@@ -36,17 +38,20 @@ node heap.test.js
 
 | File | What it contains |
 |---|---|
-| `index.html` | Page structure: the three panels, form, toolbar, SVG canvas |
-| `style.css` | All styling (white, minimal, one neutral accent, triage colours only) |
+| `index.html` | Page structure: header, stat strip, toolbar, three panels, explainer |
+| `style.css` | All styling, including the dark theme, print and contrast rules |
 | `heap.js` | **The data structure only** — `MinHeap` class, no DOM code |
-| `app.js` | **UI logic only** — form validation, panels, SVG tree, animation |
+| `tree.js` | **The drawing only** — draws an array as an SVG binary tree |
+| `app.js` | **The page** — form validation, panels, step replay, animation |
 | `heap.test.js` | Console tests for `heap.js` (run with `node heap.test.js`) |
-| `static/logo.svg` | Header logo — a 3-node heap above a heartbeat line on a navy square |
+| `tools/dry-run.js` | Terminal demo that prints every step of the heap |
+| `static/logo.svg` | Header logo — a 3-node heap above a heartbeat line |
 | `static/favicon.svg` | Tab icon — the logo simplified for 16×16 / 32×32 |
 | `README.md` | This file |
+| `SRS.md` | Software Requirements Specification — requirement IDs, data rules, design, traceability, demo script |
 
-`heap.js` and `app.js` are plain `<script>` files (no modules), so the page
-also runs directly from the file system.
+All scripts are plain `<script>` files (no modules), so the page also runs
+directly from the file system.
 
 ---
 
@@ -59,14 +64,14 @@ browser already knows how to run all three languages used here:
 |---|---|---|---|
 | Structure | HTML | The skeleton — what is on the page | `index.html` |
 | Style | CSS | The paint — colours, spacing, motion | `style.css` |
-| Behaviour | JavaScript | The brain — data and updates | `heap.js`, `app.js` |
+| Behaviour | JavaScript | The brain — data and updates | `heap.js`, `tree.js`, `app.js` |
 
 Why this is enough for the project:
 
 - **The algorithm needs no library.** A heap is just an array plus two loops,
   so hand-writing it is shorter than learning a dependency.
 - **The drawing is plain SVG.** Browsers can draw circles and lines natively;
-  `app.js` creates those elements and moves them — no charting library.
+  `tree.js` creates those elements and moves them — no charting library.
 - **Everything runs offline.** Double-click `index.html`; nothing to install,
   nothing to compile, nothing to deploy.
 
@@ -145,6 +150,8 @@ which is exactly what you see animating.
 
 ## Features
 
+### Simulating the emergency room
+
 - **Register patient** — validated form (name 2–40 chars, age 0–120, condition,
   triage level 1–5). Duplicate names are allowed; every patient gets a unique ID.
 - **Waiting list** — cards sorted by priority with rank, arrival time and a
@@ -152,21 +159,54 @@ which is exactly what you see animating.
   rank** and the other cards slide down, so the reordering is visible rather than
   instant. **Treat next** pops the root and appends the patient to the
   **Treated history** with their waiting time.
-- **Heap view** — the heap drawn as an SVG tree: new nodes fade in and bubble up,
-  the last node travels to the root and sinks down, and the **array form** of the
-  heap is shown underneath with the active indices highlighted.
+- **Change a level in place** — every card carries a small level picker. Change
+  it and the heap re-heapifies before your eyes (the tree glides into place).
+- **Filter** — search by name, ID or condition; the count shows `visible / total`.
+- **Heap view** — the heap drawn as an SVG tree with faint depth guides (`d0`,
+  `d1`, …) and each node's **array index**. New nodes fade in and bubble up, the
+  last node travels to the root and sinks down, and the **array form** is shown
+  underneath with the active indices highlighted.
 - **Load demo patients** — 10 sample patients whose *arrival* order differs from
   their *priority* order (a level-5 sprain arrives first), so…
 - **Compare with FIFO** — shows the priority order next to plain arrival order.
-- **Step-by-step mode** — pauses every operation and offers a **Next step**
-  button; the text line describes each swap (e.g. *"Swapped 2 with parent 4"*).
+- **Step-by-step mode** + **step scrubber** — pause every operation, then either
+  press **Next step** or drag the slider to jump to any step. The text line
+  describes each comparison and swap.
 - **Animation speed** slider (0.5× – 2.5×) and a complexity badge
   (`insert O(log n)`, `remove O(log n)`, `peek O(1)`).
-- **Clear all** empties the heap and the treated history to start a fresh demo.
-- **“How this page works”** section on the page explains the stack, the idea
-  and the click-to-animation flow in plain language.
-- Empty states everywhere, `prefers-reduced-motion` support, responsive down to
-  mobile width, and no console errors.
+
+### Explaining itself
+
+- **Stat strip** — patients waiting, patients at level 1, patients treated, and
+  the total **comparisons / swaps** the heap has done, plus a live **triage
+  distribution bar**.
+- **Heap-property badge** — `✓ min-heap holds` updates after every step, so you
+  can watch it flip to `⚠ order broken` while a removal is mid-sink and then
+  heal. That is the algorithm proving itself.
+- **Guided tour** (`Take the tour` or <kbd>?</kbd>) — four short coach marks
+  pointing at the form, the waiting list, the heap and the demo button.
+- **“How this page works”** section — the stack, the idea, the click-to-animation
+  flow, glossary tooltips and a **heap vs sorted-array cost table**.
+- **README walkthrough** below for teammates and viva questions.
+
+### Quality of life
+
+- **Undo** — one click (or <kbd>U</kbd>) steps back through the last 30 actions,
+  including level changes, demo loads and “Clear all”.
+- **Export CSV** — downloads every waiting and treated patient with level,
+  condition, arrival and waiting time (opens in Excel/Sheets).
+- **Remembers your session** — patients, counters, theme, speed and modes are
+  stored in `localStorage`, so a refresh does not lose the demo.
+- **Dark mode** — the header switch recolours the whole page and is remembered.
+- **Keyboard shortcuts** — <kbd>D</kbd> demo, <kbd>T</kbd> treat, <kbd>U</kbd>
+  undo, <kbd>E</kbd> export, <kbd>F</kbd> FIFO, <kbd>S</kbd> step mode,
+  <kbd>/</kbd> search, <kbd>?</kbd> tour.
+- **Print styles** — printing gives a clean snapshot of the panels without the
+  toolbar or the tour.
+- **Accessibility** — ARIA list roles on the waiting/treated lists, a live
+  status region, visible focus styles, focus returned to the right control after
+  an operation, `prefers-reduced-motion` support and a `prefers-contrast` mode.
+- Responsive down to mobile width, and no console errors.
 
 ### Edge cases handled
 
@@ -176,23 +216,27 @@ which is exactly what you see animating.
   cards distinguishable.
 - **Extracting the only patient**, **inserting into an empty heap**, and
   **level ties** (resolved by arrival order) are all unit-tested.
+- **Blocked storage** (private mode, some `file://` setups) → the page still
+  works, it just forgets between visits.
 
 ---
 
 ## Explain the code in plain English
 
-### The three files, one job each
+### The files, one job each
 
 ```
 index.html   →  the page skeleton (nothing clever)
 style.css    →  how it looks (colours, spacing, animation styles)
 heap.js      →  the data structure      (knows nothing about the page)
+tree.js      →  the drawing             (knows nothing about the heap rules)
 app.js       →  the page                (knows nothing about how a heap works)
 ```
 
-The split is the key idea: **business logic and presentation never mix.**
-`heap.js` could be reused in a terminal program, and `app.js` could draw any
-other data structure.
+The split is the key idea: **business logic, drawing and presentation never
+mix.** `heap.js` could be reused in a terminal program (`tools/dry-run.js`
+does exactly that), `tree.js` could draw any array-based tree, and `app.js`
+could drive any other data structure.
 
 ### What a min-heap is, without jargon
 
@@ -217,19 +261,20 @@ parent(i) = floor((i - 1) / 2)      left(i) = 2*i + 1      right(i) = 2*i + 2
 1. **`index.html`** — the user fills the form and presses *Register*.
 2. **`app.js · validateForm()`** — checks the fields and builds
    `{ name, age, condition, level, arrivalTime }`.
-3. **`app.js · startInsert()`** — takes a snapshot of the current array, then
-   calls **`heap.js · insert()`**.
+3. **`app.js · startInsert()`** — pushes an undo snapshot, takes a snapshot of
+   the current array, then calls **`heap.js · insert()`**.
 4. **`insert()`** — appends the patient, stamps `seq` for the tie-break, bubbles
    up, and **returns a list of steps** (`insert`, `compare`, `swap`) with a
    readable message for each one.
 5. **`app.js · startOperation()`** — replays those steps on the snapshot, one at
-   a time, redrawing the tree, the array chips and the waiting list each time.
-6. **`finishOperation()`** — adopts the real heap array (`heap.toArray()`) and
-   unlocks the buttons.
+   a time, redrawing the tree (`tree.js`), the array chips and the waiting list.
+6. **`finishOperation()`** — adopts the real heap array (`heap.toArray()`),
+   updates the counters, saves the session and unlocks the buttons.
 
 **Treat next** is the same pipeline with `extractMin()` (a `remove-root` step,
-then `compare`/`swap` steps going down). **Load demo** and **Clear all** skip the
-animation because they are bulk setup, not a single operation.
+then `compare`/`swap` steps going down). **Load demo**, **Clear all**, **Undo**
+and **level changes** skip the animation because they are bulk setup, not a
+single operation.
 
 ### Questions people ask
 
@@ -254,6 +299,13 @@ keeps its shape and height, and only one path changes.
 `seq`, an arrival counter the heap owns. Same triage level → smaller `seq` wins,
 so equal patients are served strictly first-come-first-served.
 
+**“How does undo work without touching `heap.js`?”**
+
+A snapshot is just the current array plus the treated log and the counters.
+Undo clears the heap and re-inserts the snapshot in arrival order. Because the
+comparator only looks at `level` and `seq`, re-inserting in arrival order
+reproduces exactly the same heap.
+
 ---
 
 ## Project structure for the viva
@@ -261,7 +313,8 @@ so equal patients are served strictly first-come-first-served.
 ```
 index.html  ──loads──►  heap.js   (MinHeap: insert / extractMin / peek /
                                     heapifyUp / heapifyDown / size)
-                    └─►  app.js    (form → heap.insert() → steps → SVG animation)
+                    ├─►  tree.js   (array → positioned SVG nodes and edges)
+                    └─►  app.js    (form → heap.insert() → steps → animation)
 ```
 
 Talking points:
@@ -276,3 +329,5 @@ Talking points:
    no pointers and guarantees height `⌊log2 n⌋`.
 4. **Fairness:** the `seq` counter makes the queue stable — equal triage levels
    are served strictly in arrival order (no starvation).
+5. **The badge is the proof:** the heap-property badge checks every parent
+   against its children after every step, so the invariant is verified live.
